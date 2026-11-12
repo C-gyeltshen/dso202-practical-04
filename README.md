@@ -1,147 +1,322 @@
-# Hands-On Lab — Environment Setup (Kind Cluster)
+# GitOps with Argo CD — Lab Report
 
-## Step 1: Create the 3-Node Kind Cluster
+This lab sets up Argo CD on a Kind Kubernetes cluster and uses it to deploy a simple web app from GitHub. It then tests three core GitOps behaviours: Git as the single source of truth, self-healing, and automatic pruning.
 
-Same K8s Cluster - dso202.
+**Repository:** [`C-gyeltshen/dso202-gitops-demo`](https://github.com/C-gyeltshen/dso202-gitops-demo)
 
-Verify your nodes:
+---
+
+## Table of Contents
+
+1. [Environment Setup](#1-environment-setup)
+2. [Install Argo CD](#2-install-argo-cd)
+3. [Access the Argo CD UI](#3-access-the-argo-cd-ui)
+4. [Prepare the GitHub Repository](#4-prepare-the-github-repository)
+5. [Register the Application in Argo CD](#5-register-the-application-in-argo-cd)
+6. [Experiment 1 — Git as the Single Source of Truth](#6-experiment-1--git-as-the-single-source-of-truth)
+7. [Experiment 2 — Configuration Drift & Self-Healing](#7-experiment-2--configuration-drift--self-healing)
+8. [Experiment 3 — Automatic Pruning](#8-experiment-3--automatic-pruning)
+9. [Issues Encountered](#9-issues-encountered)
+
+---
+
+## 1. Environment Setup
+
+The lab reuses the existing 3-node Kind cluster **`dso202`** (1 control plane, 2 worker nodes).
+
+Check that the cluster containers are running:
+
 ```bash
 docker ps
 ```
-![1](./evidence/1.png)
+
+![Docker containers](./evidence/1.png)
+
+Check that all nodes are `Ready`:
+
 ```bash
 kubectl get nodes
 ```
-![2](./evidence/2.png)
 
-Step 2: Install Argo CD on the Cluster
-Argo CD should always live in its own dedicated namespace called argocd.
+![Cluster nodes](./evidence/2.png)
+
+---
+
+## 2. Install Argo CD
+
+Argo CD runs in its own dedicated namespace, `argocd`.
+
 ```bash
-# 1. Create the namespace
+# Create the namespace
 kubectl create namespace argocd
 
-# 2. Apply the official stable Argo CD installation manifest
+# Install the official stable Argo CD manifest
 kubectl apply -n argocd -f https://raw.githubusercontent.com/argoproj/argo-cd/stable/manifests/install.yaml
-
 ```
-![3](./evidence/3.png)
-![4](./evidence/4.png)
-![5](./evidence/5.png)
 
-Step 3: Access the Argo CD UI & Get Admin Credentials
-1. Retrieve the auto-generated initial password:
-```bash 
+![Create namespace](./evidence/3.png)
+![Install Argo CD](./evidence/4.png)
+
+Wait for the Argo CD pods to become ready:
+
+```bash
+kubectl wait --for=condition=Ready pods --all -n argocd --timeout=300s
+kubectl get pods -n argocd
+```
+
+![Argo CD pods](./evidence/5.png)
+
+---
+
+## 3. Access the Argo CD UI
+
+### 3.1 Get the initial admin password
+
+```bash
 kubectl -n argocd get secret argocd-initial-admin-secret -o jsonpath="{.data.password}" | base64 -d; echo
-
-password = NtGAgbw0O9qtUrEz
 ```
 
-2. Forward local port 8080 to the Argo CD API Server:
-```bash 
+> The password is not recorded here. Credentials should never be committed to Git.
+
+### 3.2 Port-forward the Argo CD server
+
+Run this in a separate terminal and keep it open:
+
+```bash
 kubectl port-forward svc/argocd-server -n argocd 8080:443
 ```
-![7](./evidence/7.png)
 
-3. Log into the Web UI:
+![Port forward](./evidence/7.png)
 
-* Open your browser and go to: https://localhost:8080
-* Your browser will show a "Your connection is not private" warning (because Argo CD uses a self-signed TLS certificate out of the box). Click Advanced 
- Proceed to localhost (unsafe).
-* Log in with:
-Username: admin
-Password: (Paste the password from Step 1)
+### 3.3 Log in
 
-![8](./evidence/8.png)
+1. Open **https://localhost:8080**.
+2. Accept the self-signed certificate warning (**Advanced → Proceed to localhost**).
+3. Log in with username `admin` and the password from step 3.1.
 
-Module 5: Hands-On Lab — Your First GitOps Pipeline
+![Argo CD login](./evidence/8.png)
 
-Step 1: Prepare Your GitHub Repository (The Desired State)
+---
 
-1. Log into your GitHub account and create a new Public repository named dso202-gitops-demo (Check "Add a README file" so the main branch is initialized).
-![9](./evidence/9.png)
+## 4. Prepare the GitHub Repository
 
-2. Clone the repository to your laptop (or create the files directly in the GitHub web interface):
-```bash 
-git clone https://github.com/<YOUR-GITHUB-USERNAME>/k8s-gitops-demo.git
-cd k8s-gitops-demo
+### 4.1 Create and clone the repo
+
+A public repository named `dso202-gitops-demo` was created on GitHub with a README so the `main` branch is initialised.
+
+![GitHub repo](./evidence/9.png)
+
+```bash
+git clone https://github.com/C-gyeltshen/dso202-gitops-demo.git
+cd dso202-gitops-demo
 ```
-![10](./evidence/10.png)
 
-3. Inside the repository, create a folder named manifests and add two files inside it: deployment.yaml and service.yaml.
+![Clone repo](./evidence/10.png)
+
+### 4.2 Add the Kubernetes manifests
+
 ```bash
 mkdir manifests
 ```
-![11](./evidence/11.png)
 
-Create manifests/deployment.yaml:
-![12](./evidence/12.png)
+![Create manifests folder](./evidence/11.png)
 
-Create manifests/service.yaml:
+**`manifests/deployment.yaml`**
 
-![13](./evidence/13.png)
+```yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: webapp-deploy
+  labels:
+    app: webapp
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: webapp
+  template:
+    metadata:
+      labels:
+        app: webapp
+    spec:
+      containers:
+        - name: webapp
+          image: nginxdemos/hello:plain-text
+          ports:
+            - containerPort: 80
+```
 
-commit and push the code.
+![deployment.yaml](./evidence/12.png)
 
-```bash 
+**`manifests/service.yaml`**
+
+```yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: webapp-svc
+spec:
+  selector:
+    app: webapp
+  ports:
+    - protocol: TCP
+      port: 80
+      targetPort: 80
+  type: ClusterIP
+```
+
+![service.yaml](./evidence/13.png)
+
+### 4.3 Commit and push
+
+```bash
 git add .
 git commit -m "Initial deployment with 2 replicas"
 git push origin main
 ```
-![14](./evidence/14.png)
 
-Step 2: Register the Application in Argo CD (Declaratively!)
-While you can click "+ NEW APP" in the Argo CD Web UI to connect your repository, true GitOps engineers define the Argo CD Application itself as a Kubernetes YAML file!
+![Push to GitHub](./evidence/14.png)
 
-On your laptop (outside the Git repo if you prefer), create a file named argocd-app.yaml. Make sure to replace <YOUR-GITHUB-USERNAME> with your actual GitHub username:
+---
 
+## 5. Register the Application in Argo CD
 
-Apply this CRD to your cluster:
+The Argo CD `Application` is defined declaratively in `argocd-app.yaml`:
+
+```yaml
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: my-webapp
+  namespace: argocd            # Applications always live in the argocd namespace
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/C-gyeltshen/dso202-gitops-demo.git
+    targetRevision: HEAD
+    path: manifests
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: demo-app        # Where the app's resources are deployed
+  syncPolicy:
+    automated:
+      prune: true              # Delete resources removed from Git
+      selfHeal: true           # Revert manual changes in the cluster
+    syncOptions:
+      - CreateNamespace=true   # Create demo-app if it does not exist
+```
+
+Apply it:
+
 ```bash
 kubectl apply -f argocd-app.yaml
 ```
-![15](./evidence/15.png)
 
-![16](./evidence/16.png)
+![Apply Application](./evidence/15.png)
+![Application in Argo CD UI](./evidence/16.png)
 
-the namespace demo-app is not created in the instructoin so i am creating the namespace `manifest/namespace.yaml`
+A `manifests/namespace.yaml` was also added so the `demo-app` namespace is defined explicitly in Git (see [Issues Encountered](#9-issues-encountered)):
 
-![17](./evidence/17.png)
+```yaml
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: demo-app
+```
 
+![namespace.yaml](./evidence/17.png)
 
-```bash 
+Verify the pods are running across the worker nodes:
+
+```bash
 kubectl get pods -n demo-app -o wide
 ```
-![18](./evidence/18.png)
 
-Step 3: Experiment 1 — Git as the Single Source of Truth
+![Pods in demo-app](./evidence/18.png)
 
-1. Let's scale our application from 2 replicas to 4 replicas the GitOps way.
+**Where each resource lives:**
 
-2. Go to your GitHub repository (manifests/deployment.yaml).
-Change replicas: 2 to replicas: 4.
-![19](./evidence/19.png)
-3. Commit and push the change to main (or edit and commit directly in the GitHub browser UI).
-![20](./evidence/20.png)
-4. Go to the Argo CD UI.
-    * Remember: By default, Argo CD polls GitHub every 3 minutes. If you don't want to wait 3 minutes, click the "Refresh" button at the top of the Argo CD UI.
-    * The moment Argo CD sees the new commit hash, watch the visual graph automatically spin up 2 new pods!
+| Resource | Namespace |
+| :--- | :--- |
+| Application `my-webapp` | `argocd` |
+| Deployment `webapp-deploy` | `demo-app` |
+| Service `webapp-svc` | `demo-app` |
 
+---
 
-Step 4: Experiment 2 — Configuration Drift & Self-Healing
-Now let's simulate a "rogue admin" who bypasses Git and modifies the cluster manually using kubectl.
+## 6. Experiment 1 — Git as the Single Source of Truth
 
-1. Keep your Argo CD UI open on the screen so you can watch the pod tree live.
-2. In your terminal, manually scale the deployment down to 1 replica:
+**Goal:** scale the app from 2 to 4 replicas by changing Git only.
 
-```bash 
+1. In `manifests/deployment.yaml`, change `replicas: 2` to `replicas: 4`.
+
+   ![Edit replicas](./evidence/19.png)
+
+2. Commit and push to `main`.
+
+   ![Commit change](./evidence/20.png)
+
+3. In the Argo CD UI, click **Refresh** (or wait up to 3 minutes for polling).
+
+**Result:** Argo CD detects the new commit and creates 2 additional pods, bringing the total to 4.
+
+---
+
+## 7. Experiment 2 — Configuration Drift & Self-Healing
+
+**Goal:** show that manual changes made outside Git are reverted.
+
+Manually scale the deployment down, bypassing Git:
+
+```bash
 kubectl scale deployment webapp-deploy -n demo-app --replicas=1
 ```
-![21](./evidence/21.png)
 
-Step 5: Experiment 3 — Automatic Pruning
-What happens if we no longer need a resource and remove it from Git?
+![Manual scale and self-heal](./evidence/21.png)
 
-1. In your GitHub repo (k8s-gitops-demo), delete the manifests/service.yaml file and commit the deletion.
-2. Click Refresh in the Argo CD UI.
-3. Because we enabled prune: true, Argo CD sees that service.yaml no longer exists in Git and automatically deletes webapp-svc from the demo-app namespace.
-4. (Optional) Use git revert HEAD to bring the Service back!
+**Result:** the app briefly shows `OutOfSync`. Because `selfHeal: true` is set, Argo CD restores the deployment to the 4 replicas defined in Git within seconds.
+
+---
+
+## 8. Experiment 3 — Automatic Pruning
+
+**Goal:** show that deleting a manifest from Git deletes the resource from the cluster.
+
+1. Delete `manifests/service.yaml` from the repo and commit the deletion.
+2. Click **Refresh** in the Argo CD UI.
+3. Because `prune: true` is set, Argo CD deletes `webapp-svc` from the `demo-app` namespace.
+4. *(Optional)* Restore the Service with `git revert HEAD` and push.
+
+---
+
+## 9. Issues Encountered
+
+### Repository URL mismatch
+
+**Symptom:** `kubectl get pods -n demo-app` returned `No resources found`, and the application showed `Sync Status: Unknown`.
+
+```bash
+kubectl describe application my-webapp -n argocd
+```
+
+reported:
+
+```text
+ComparisonError: failed to list refs: authentication required: Repository not found.
+```
+
+**Cause:** the lab guide names the repository `dso202-gitops-demo`, but its clone command and `repoURL` use `k8s-gitops-demo`. Argo CD was pointing at a repository that does not exist.
+
+**Fix:** update `repoURL` in `argocd-app.yaml` to the real repository, then re-apply and force a refresh:
+
+```bash
+sed -i '' 's/k8s-gitops-demo/dso202-gitops-demo/' argocd-app.yaml
+kubectl apply -f argocd-app.yaml
+kubectl annotate application my-webapp -n argocd argocd.argoproj.io/refresh=hard --overwrite
+```
+
+### The `demo-app` namespace
+
+The guide never runs `kubectl create namespace demo-app`. This is intentional: `CreateNamespace=true` in the Application's `syncOptions` makes Argo CD create the namespace on its first successful sync. The namespace only appeared to be missing because the sync was failing (see above). `manifests/namespace.yaml` was added to make the namespace explicit in Git. Note that with `prune: true`, deleting this file from Git would delete the namespace and everything in it.
+
